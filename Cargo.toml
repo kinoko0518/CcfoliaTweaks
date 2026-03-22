@@ -7,4 +7,6 @@ edition = "2024"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 rfd = "0.17.2"
+thirtyfour = "0.36.1"
+tokio = { version = "1", features = ["full"] }
 winnow = "1.0.0"

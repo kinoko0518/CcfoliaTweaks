@@ -1,4 +1,10 @@
-use winnow::{Parser, combinator::repeat, error::ContextError, token::take_until};
+use winnow::{
+    Parser,
+    ascii::digit1,
+    combinator::{alt, eof, peek, repeat, repeat_till},
+    error::ContextError,
+    token::{any, take_until},
+};
 
 #[derive(Default)]
 pub struct LogAnalyser {
@@ -22,9 +28,43 @@ fn parse_a_html<'s>(input: &mut &'s str) -> Result<(&'s str, &'s str), ContextEr
         .parse_next(input)
 }
 
-pub fn analyse_log<'s>(log: &'s str) -> Result<Vec<(&'s str, &'s str)>, ContextError> {
+pub fn analyse_html_log<'s>(log: &'s str) -> Result<Vec<(&'s str, &'s str)>, ContextError> {
     let mut trimmed = log.trim();
     let log: Vec<(&str, &str)> = repeat(0.., parse_a_html).parse_next(&mut trimmed)?;
+    Ok(log)
+}
+
+fn copied_text_nameplate<'s>(input: &mut &'s str) -> Result<&'s str, ContextError> {
+    (
+        take_until(0.., " - ").verify(|s: &str| !s.contains('\n') && !s.contains('\r')),
+        " - ".void(),
+        alt((
+            (alt(("今日", "昨日")), ' ', (digit1, ':', digit1)).void(),
+            (digit1, '/', digit1, '/', digit1).void(),
+        )),
+    )
+        .map(|(name, _, _): (&'s str, (), ())| name)
+        .parse_next(input)
+}
+
+fn parse_a_copied_text<'s>(input: &mut &'s str) -> Result<(&'s str, &'s str), ContextError> {
+    (
+        copied_text_nameplate,
+        repeat_till(
+            0..,
+            any.void(),
+            peek(alt((copied_text_nameplate.void(), eof.void()))),
+        )
+        .map(|(_, _): ((), _)| ())
+        .take(),
+    )
+        .map(|(nameplate, content): (&'s str, &'s str)| (nameplate, content.trim()))
+        .parse_next(input)
+}
+
+pub fn analyse_copied_text_log<'s>(log: &'s str) -> Result<Vec<(&'s str, &'s str)>, ContextError> {
+    let mut trimmed = log.trim();
+    let log: Vec<(&'s str, &'s str)> = repeat(0.., parse_a_copied_text).parse_next(&mut trimmed)?;
     Ok(log)
 }
 
@@ -46,7 +86,14 @@ impl LogAnalyser {
         let acc = &mut self.log;
 
         for (chara, content) in value {
-            acc.push((cs.query_charactor(chara), content.to_string()));
+            let mut content = content;
+            const EDITED: &str = "[編集済]";
+            if content.ends_with(EDITED) {
+                content = &content[0..(content.len() - EDITED.len())];
+            }
+            if !content.is_empty() {
+                acc.push((cs.query_charactor(chara), content.trim().to_string()));
+            }
         }
     }
 }

@@ -1,13 +1,28 @@
-mod log_analyser;
+mod ccfolia;
 
 use gpui::{
-    App, Application, Bounds, Context, Entity, Point, ScrollHandle, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Entity, Point, ScrollHandle, Window, WindowOptions, div, prelude::*,
+    px, rgb, size,
 };
+use thirtyfour::{DesiredCapabilities, WebDriver};
+
+use crate::{ccfolia::send_to_ccfolia, log_analyser::LogAnalyser};
+
+mod log_analyser;
 use gpui_component::button;
 use rfd::FileDialog;
+use std::sync::OnceLock;
+use std::{io::Write, process::Command};
+use tokio::runtime::{Builder, Runtime};
 
-use crate::log_analyser::{LogAnalyser, analyse_log};
+// アプリケーション全体で使い回すTokioランタイム
+fn tokio_rt() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    // new_current_thread() を new_multi_thread() に変更し、enable_all() を追加
+    RT.get_or_init(|| Builder::new_multi_thread().enable_all().build().unwrap())
+}
+
+use crate::log_analyser::{analyse_copied_text_log, analyse_html_log};
 
 struct CcfoliaTweaks {
     pub analyser: Entity<LogAnalyser>,
@@ -40,11 +55,14 @@ impl Render for CcfoliaTweaks {
             .child(
                 // ========== 左パネル ==========
                 div()
-                    .w(px(200.0))
+                    .w(px(300.0))
                     .flex_shrink_0()
                     .h_full()
                     .bg(rgb(0x282c34))
                     .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(div().text_color(rgb(0xffffff)).child("操作パネル"))
                     .child(
                         button::Button::new("load_html")
@@ -57,22 +75,128 @@ impl Render for CcfoliaTweaks {
                                     .pick_file();
 
                                 if let Some(path) = file_path {
-                                    if let Ok(read) = std::fs::read_to_string(path) {
-                                        if let Ok(analysed_data) = analyse_log(&read) {
-                                            this.analyser.update(cx, |analyser, cx| {
-                                                analyser.analyse(analysed_data);
-                                                cx.notify();
-                                            });
-                                            // 読み込み時はページとスクロールを一番上へリセット
-                                            this.current_page = 0;
-                                            this.scroll_handle.set_offset(Point {
-                                                x: px(0.),
-                                                y: px(0.),
-                                            });
-                                            cx.notify();
+                                    match std::fs::read_to_string(&path) {
+                                        Ok(read) => {
+                                            match analyse_html_log(&read) {
+                                                Ok(analysed_data) => {
+                                                    this.analyser.update(cx, |analyser, cx| {
+                                                        analyser.analyse(analysed_data);
+                                                        cx.notify();
+                                                    });
+                                                    // 読み込み時はページとスクロールを一番上へリセット
+                                                    this.current_page = 0;
+                                                    this.scroll_handle.set_offset(Point {
+                                                        x: px(0.),
+                                                        y: px(0.),
+                                                    });
+                                                    cx.notify();
+                                                }
+                                                Err(e) => eprintln!("HTML解析エラー: {:?}", e),
+                                            }
+                                        }
+                                        Err(e) => eprintln!("ファイル読み込みエラー: {:?}", e),
+                                    }
+                                } else {
+                                    eprintln!("ファイルが選択されませんでした");
+                                }
+                            })),
+                    )
+                    .child(
+                        button::Button::new("load_copied_text")
+                            .label("コピーしたテキストを読み込み")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let file_path = FileDialog::new()
+                                    .add_filter("テキストファイル", &["txt"])
+                                    .set_title("ファイルを選択してください")
+                                    .set_directory("/")
+                                    .pick_file();
+
+                                if let Some(path) = file_path {
+                                    match std::fs::read_to_string(&path) {
+                                        Ok(read) => {
+                                            match analyse_copied_text_log(&read) {
+                                                Ok(analysed_data) => {
+                                                    this.analyser.update(cx, |analyser, cx| {
+                                                        analyser.analyse(analysed_data);
+                                                        cx.notify();
+                                                    });
+                                                    // 読み込み時はページとスクロールを一番上へリセット
+                                                    this.current_page = 0;
+                                                    this.scroll_handle.set_offset(Point {
+                                                        x: px(0.),
+                                                        y: px(0.),
+                                                    });
+                                                    cx.notify();
+                                                }
+                                                Err(e) => eprintln!("テキスト解析エラー: {:?}", e),
+                                            }
+                                        }
+                                        Err(e) => eprintln!("ファイル読み込みエラー: {:?}", e),
+                                    }
+                                } else {
+                                    eprintln!("ファイルが選択されませんでした");
+                                }
+                            })),
+                    )
+                    .child(
+                        button::Button::new("dump_all")
+                            .label("まとめて書き出し")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let chara = &this.analyser.read(cx).charactors.charactors;
+                                match FileDialog::new().save_file() {
+                                    Some(path) => {
+                                        let mut file = std::fs::File::create(path).unwrap();
+                                        for (i, c) in &this.analyser.read(cx).log {
+                                            writeln!(file, "[main] {} : {}\n", chara[*i], c)
+                                                .unwrap();
                                         }
                                     }
+                                    None => {
+                                        eprintln!("書き込み先が指定されませんでした");
+                                    }
                                 }
+                            })),
+                    )
+                    .child(
+                        button::Button::new("ccfolia_out")
+                            .label("ccfolia出力開始")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let analyser = this.analyser.read(cx);
+                                let charactors_list = analyser.charactors.charactors.clone();
+                                let log_data = analyser.log.clone();
+
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        // Tokioのランタイムにタスクを投げる
+                                        let result = tokio_rt()
+                                            .spawn(async move {
+                                                // Geckodriverへの接続
+                                                println!("接続中...");
+                                                let caps = DesiredCapabilities::firefox();
+                                                let driver =
+                                                    WebDriver::new("http://localhost:4444", caps)
+                                                        .await
+                                                        .unwrap();
+
+                                                // 抽出しておいた（Send可能な）データを使用する
+                                                for (i, c) in &log_data {
+                                                    let _ = send_to_ccfolia(
+                                                        &driver,
+                                                        charactors_list[*i].clone(),
+                                                        c.clone(),
+                                                    )
+                                                    .await;
+                                                }
+
+                                                let _ = driver.quit().await;
+                                            })
+                                            .await;
+
+                                        if let Err(e) = result {
+                                            eprintln!("Tokio task failed: {:?}", e);
+                                        }
+                                    })
+                                    .detach();
                             })),
                     ),
             )
@@ -189,13 +313,29 @@ impl Render for CcfoliaTweaks {
 }
 
 fn main() {
+    Command::new("firefox")
+        .env("MOZ_MARIONETTE", "1")
+        .arg("--marionette")
+        .arg("--no-remote")
+        .arg("--new-instance")
+        .spawn().expect("Firefoxマリオネットの起動に失敗しました。firefoxのバイナリにパスが通っていることを確認してください");
+
+    Command::new("geckodriver")
+        .arg("--connect-existing")
+        .arg("--marionette-port")
+        .arg("2828")
+        .arg("--port")
+        .arg("4444")
+        .spawn()
+        .expect("geckdriverの起動に失敗しました。");
+
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
 
         let bounds = Bounds::centered(None, size(px(800.), px(600.0)), cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
             |_, cx| {
