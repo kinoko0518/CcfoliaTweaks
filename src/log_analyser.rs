@@ -19,12 +19,14 @@ pub struct CharactorSet {
 
 fn parse_a_html<'s>(input: &mut &'s str) -> Result<(&'s str, &'s str), ContextError> {
     (
-        "[main] ".void(),
-        take_until(0.., " : "),
-        " : ".void(),
-        take_until(0.., "[main]"),
+        "[main]".void(),
+        take_until(0.., ':'),
+        ':'.void(),
+        repeat_till(0.., any.void(), peek(alt(("[main]".void(), eof.void()))))
+            .map(|(_, _): ((), _)| ())
+            .take(),
     )
-        .map(|(_, name, _, content): ((), &str, (), &str)| (name, content.trim()))
+        .map(|(_, name, _, content): ((), &str, (), &str)| (name.trim(), content.trim()))
         .parse_next(input)
 }
 
@@ -39,7 +41,12 @@ fn copied_text_nameplate<'s>(input: &mut &'s str) -> Result<&'s str, ContextErro
         take_until(0.., " - ").verify(|s: &str| !s.contains('\n') && !s.contains('\r')),
         " - ".void(),
         alt((
-            (alt(("今日", "昨日")), ' ', (digit1, ':', digit1)).void(),
+            (
+                alt(("今日".void(), "昨日".void(), ("先週 ", any, "曜日").void())),
+                ' ',
+                (digit1, ':', digit1),
+            )
+                .void(),
             (digit1, '/', digit1, '/', digit1).void(),
         )),
     )

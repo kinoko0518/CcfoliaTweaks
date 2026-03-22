@@ -4,6 +4,7 @@ use gpui::{
     App, Application, Bounds, Entity, Point, ScrollHandle, Window, WindowOptions, div, prelude::*,
     px, rgb, size,
 };
+use gpui_component::scroll::ScrollableElement;
 use thirtyfour::{DesiredCapabilities, WebDriver};
 
 use crate::{ccfolia::send_to_ccfolia, log_analyser::LogAnalyser};
@@ -198,6 +199,21 @@ impl Render for CcfoliaTweaks {
                                     })
                                     .detach();
                             })),
+                    )
+                    .child(div().flex_grow())
+                    .child(
+                        div()
+                            .overflow_y_scrollbar()
+                            .text_color(rgb(0xffffff))
+                            .child("要求キャラクター")
+                            .children(
+                                self.analyser
+                                    .read(cx)
+                                    .charactors
+                                    .charactors
+                                    .iter()
+                                    .map(|chara| format!("＊{}", chara)),
+                            ),
                     ),
             )
             .child(
